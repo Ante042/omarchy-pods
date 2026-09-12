@@ -1,5 +1,7 @@
 #include <QTest>
 #include <QFile>
+#include <QElapsedTimer>
+#include <QTimer>
 #include <QTemporaryDir>
 #include "../media/conversationvolume.hpp"
 #include "../airpods_packets.h"
@@ -26,7 +28,21 @@ private slots:
         const QString logPath = directory.filePath("commands");
         QFile executable(directory.filePath("pw-cli"));
         QVERIFY(executable.open(QIODevice::WriteOnly));
-        executable.write("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CONVERSATION_VOLUME_TEST_LOG\"\n");
+        executable.write(R"SH(#!/bin/sh
+printf '%s\n' "$*" >> "$CONVERSATION_VOLUME_TEST_LOG"
+if [ -f "$CONVERSATION_VOLUME_TEST_LOG.stall" ]; then sleep 0.25; fi
+if [ -f "$CONVERSATION_VOLUME_TEST_LOG.fail" ]; then
+    rm "$CONVERSATION_VOLUME_TEST_LOG.fail"
+    echo 'Error: simulated write failure' >&2
+    exit 1
+fi
+if [ "$4" = '{ volume: 1.000000 }' ] && [ -f "$CONVERSATION_VOLUME_TEST_LOG.fail_restore" ]; then
+    rm "$CONVERSATION_VOLUME_TEST_LOG.fail_restore"
+    echo 'Error: simulated restoration failure' >&2
+    exit 1
+fi
+printf '%s\n' "$*" >> "$CONVERSATION_VOLUME_TEST_LOG.applied"
+)SH");
         executable.close();
         QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
         qputenv("PATH", directory.path().toUtf8() + ':' + previousPath);
@@ -37,7 +53,9 @@ private slots:
             return log.readAll();
         };
         auto lastGain = [&]() {
-            const auto lines = commands().trimmed().split('\n');
+            QFile applied(logPath + QStringLiteral(".applied"));
+            if (!applied.open(QIODevice::ReadOnly)) return -1.0;
+            const auto lines = applied.readAll().trimmed().split('\n');
             const auto fields = lines.last().split(' ');
             return fields.size() >= 6 ? fields[5].toDouble() : -1.0;
         };
@@ -65,7 +83,7 @@ private slots:
         QTest::qWait(100);
         QVERIFY(lastGain() < risingGain);
         volume.reset();
-        QCOMPARE(lastGain(), 1.0);
+        QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 1.0, 1200);
         const QByteArray afterReset = commands();
         QTest::qWait(700);
         QCOMPARE(commands(), afterReset);
@@ -75,9 +93,55 @@ private slots:
         QVERIFY(lastGain() < 1.0);
         const qsizetype beforeReplacement = commands().size();
         volume.setSpeaking(true, QStringLiteral("bluez_output.replacement.1"));
-        QVERIFY(commands().mid(beforeReplacement).startsWith("set-param bluez_output.test.1 Props { volume: 1.000000 }\n"));
+        QTRY_VERIFY(commands().mid(beforeReplacement).startsWith("set-param bluez_output.test.1 Props { volume: 1.000000 }\n"));
         volume.reset();
-        QCOMPARE(lastGain(), 1.0);
+        QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 1.0, 1200);
+
+        auto marker = [&](const QString &suffix) {
+            QFile file(logPath + suffix);
+            return file.open(QIODevice::WriteOnly);
+        };
+        QVERIFY(marker(QStringLiteral(".stall")));
+        QElapsedTimer elapsed;
+        elapsed.start();
+        qint64 independentTimerAt = -1;
+        QTimer::singleShot(30, &volume, [&] { independentTimerAt = elapsed.elapsed(); });
+        volume.setSpeaking(true, sink);
+        QTest::qWait(80);
+        QVERIFY(independentTimerAt >= 0 && independentTimerAt < 200);
+        QVERIFY(QFile::remove(logPath + QStringLiteral(".stall")));
+        QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 0.008, 1200);
+
+        QVERIFY(marker(QStringLiteral(".fail")));
+        volume.setSpeaking(false, sink);
+        QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 1.0, 1500);
+        QVERIFY(!QFile::exists(logPath + QStringLiteral(".fail")));
+
+        volume.setSpeaking(true, sink);
+        QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 0.008, 1200);
+        const qsizetype beforeFailure = commands().size();
+        QVERIFY(marker(QStringLiteral(".fail_restore")));
+        volume.reset();
+        volume.setSpeaking(true, QStringLiteral("bluez_output.replacement.1"));
+        QTRY_VERIFY(commands().mid(beforeFailure).count(
+            "set-param bluez_output.test.1 Props { volume: 1.000000 }") == 2);
+        QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 0.008, 1500);
+        const QByteArray recovery = commands().mid(beforeFailure);
+        QVERIFY(recovery.lastIndexOf("bluez_output.test.1") < recovery.indexOf("bluez_output.replacement.1"));
+        volume.reset();
+        QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 1.0, 1200);
+
+        QVERIFY(marker(QStringLiteral(".stall")));
+        QVERIFY(marker(QStringLiteral(".fail")));
+        volume.setSpeaking(true, sink);
+        QTest::qWait(80);
+        const qsizetype beforeDelayedFailure = commands().size();
+        QVERIFY(QFile::remove(logPath + QStringLiteral(".stall")));
+        volume.setSpeaking(true, QStringLiteral("bluez_output.replacement.1"));
+        QTRY_VERIFY(commands().mid(beforeDelayedFailure).contains("bluez_output.replacement.1"));
+        QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 0.008, 1500);
+        volume.reset();
+        QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 1.0, 1200);
     }
 
     void conversationKeepsVolumeLoweredUntilEnd()

@@ -149,7 +149,7 @@ void MediaController::followMediaChanges() {
 bool MediaController::isActiveOutputDeviceAirPods() {
   QString defaultSink = m_pulseAudio->getDefaultSink();
   LOG_DEBUG("Default sink: " << defaultSink);
-  return defaultSink.contains(connectedDeviceMacAddress);
+  return sourceNamesAddress(defaultSink, connectedDeviceMacAddress);
 }
 
 void MediaController::handleConversationalAwareness(const QByteArray &data) {
@@ -162,12 +162,13 @@ void MediaController::handleConversationalAwareness(const QByteArray &data) {
     const auto speaking = AirPodsPackets::ConversationalAwareness::parseSpeaking(data);
     if (!speaking.has_value())
         return;
-    if (!isActiveOutputDeviceAirPods()) {
+    const QString sink = m_pulseAudio->getDefaultSink();
+    if (!sourceNamesAddress(sink, connectedDeviceMacAddress)) {
         m_conversationVolume->reset();
         return;
     }
 
-    m_conversationVolume->setSpeaking(speaking.value(), m_pulseAudio->getDefaultSink());
+    m_conversationVolume->setSpeaking(speaking.value(), sink);
 }
 
 

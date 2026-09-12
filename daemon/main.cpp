@@ -1249,6 +1249,7 @@ private slots:
         }
 
         LOG_WARN("AirPods control link lost: " << reason);
+        mediaController->resetConversationVolume();
         lostSocket->disconnect(this);
         lostSocket->close();
         lostSocket->deleteLater();
