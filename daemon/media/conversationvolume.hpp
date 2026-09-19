@@ -61,7 +61,6 @@ public:
         }
         m_requestedSink = sink;
         m_speaking = speaking;
-        m_restoreFailures = 0;
         advance();
     }
 
@@ -71,7 +70,6 @@ public:
         m_pendingWrite = false;
         m_requestedSink.clear();
         m_speaking = false;
-        m_restoreFailures = 0;
         advance();
     }
 
@@ -113,10 +111,10 @@ private:
         if (ok || (m_restoring && disappeared)) {
             m_gain = m_commandGain;
             m_dirty = m_gain != 1.0;
-            if (m_restoring) {
-                m_sink.clear();
+            if (!m_dirty)
                 m_restoreFailures = 0;
-            }
+            if (m_restoring)
+                m_sink.clear();
         } else {
             qWarning() << "PipeWire conversation volume failed for" << m_sink
                        << m_command.errorString() << error;

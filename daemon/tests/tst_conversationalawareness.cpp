@@ -36,6 +36,10 @@ if [ -f "$CONVERSATION_VOLUME_TEST_LOG.fail" ]; then
     echo 'Error: simulated write failure' >&2
     exit 1
 fi
+if [ "$4" = '{ volume: 1.000000 }' ] && [ -f "$CONVERSATION_VOLUME_TEST_LOG.fail_restore_always" ]; then
+    echo 'Error: simulated persistent restoration failure' >&2
+    exit 1
+fi
 if [ "$4" = '{ volume: 1.000000 }' ] && [ -f "$CONVERSATION_VOLUME_TEST_LOG.fail_restore" ]; then
     rm "$CONVERSATION_VOLUME_TEST_LOG.fail_restore"
     echo 'Error: simulated restoration failure' >&2
@@ -142,6 +146,50 @@ printf '%s\n' "$*" >> "$CONVERSATION_VOLUME_TEST_LOG.applied"
         QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 0.008, 1500);
         volume.reset();
         QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 1.0, 1200);
+
+        // Reaching unity through a normal fade also completes the previous dirty cycle.
+        volume.setSpeaking(true, sink);
+        QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 0.008, 1200);
+        QVERIFY(marker(QStringLiteral(".stall")));
+        QVERIFY(marker(QStringLiteral(".fail_restore")));
+        volume.reset();
+        volume.setSpeaking(false, sink);
+        QTRY_VERIFY(!QFile::exists(logPath + QStringLiteral(".fail_restore")));
+        QVERIFY(QFile::remove(logPath + QStringLiteral(".stall")));
+        QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 1.0, 1800);
+
+        volume.setSpeaking(true, sink);
+        QTRY_COMPARE_WITH_TIMEOUT(lastGain(), 0.008, 1200);
+        const qsizetype beforePersistentFailure = commands().size();
+        const QByteArray restoreCommand = "set-param bluez_output.test.1 Props { volume: 1.000000 }";
+        constexpr int expectedRestoreAttempts = 2;
+        constexpr int eventSettleMs = 100;
+        constexpr int stalledWriteSettleMs = 400;
+        QVERIFY(marker(QStringLiteral(".fail_restore_always")));
+        QVERIFY(marker(QStringLiteral(".stall")));
+        volume.reset();
+        QTRY_COMPARE(commands().mid(beforePersistentFailure).count(restoreCommand), expectedRestoreAttempts);
+
+        // Events during the last in-flight attempt must not replenish its budget.
+        volume.setSpeaking(true, QStringLiteral("bluez_output.replacement.1"));
+        volume.reset();
+        QVERIFY(QFile::remove(logPath + QStringLiteral(".stall")));
+        QTest::qWait(stalledWriteSettleMs);
+        QCOMPARE(commands().mid(beforePersistentFailure).count(restoreCommand), expectedRestoreAttempts);
+        const QByteArray afterExhaustion = commands();
+
+        // Both event paths must remain bounded after persistent failure exhausts the budget.
+        for (const QString &requestedSink : {sink, QStringLiteral("bluez_output.replacement.1")}) {
+            for (bool speaking : {true, false}) {
+                volume.setSpeaking(speaking, requestedSink);
+                QTest::qWait(eventSettleMs);
+                QCOMPARE(commands(), afterExhaustion);
+                volume.reset();
+                QTest::qWait(eventSettleMs);
+                QCOMPARE(commands(), afterExhaustion);
+            }
+        }
+        QCOMPARE(lastGain(), 0.008);
     }
 
     void conversationKeepsVolumeLoweredUntilEnd()
